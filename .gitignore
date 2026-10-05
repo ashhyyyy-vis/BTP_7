@@ -1,6 +1,4 @@
 Refs/
 .obsidian
-data/clean
-data/clean8k
-data/degraded
+data/
 .env

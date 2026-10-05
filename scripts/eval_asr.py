@@ -145,8 +145,8 @@ def read_jsonl_cache(path):
     return cache
 
 
-def shard_files(root, model):
-    return sorted(root.glob(f"asr_{model}.shard*of*.jsonl"))
+def shard_files(shard_root, model):
+    return sorted(shard_root.glob(f"asr_{model}.shard*of*.jsonl"))
 
 
 # ------------------------------------------------------------------ scoring
@@ -200,6 +200,8 @@ def main():
                     help="which slice this run handles, 0 .. num-shards-1")
     ap.add_argument("--merge", action="store_true",
                     help="combine all shard files in --data and score; no transcription")
+    ap.add_argument("--shard-dir", default=None,
+                    help="directory for shard files (default: shards/)")
     args = ap.parse_args()
 
     if args.num_shards < 1 or not (0 <= args.shard_id < args.num_shards):
@@ -208,6 +210,8 @@ def main():
         sys.exit("--merge combines all shards itself; don't pass --num-shards with it")
 
     root = Path(args.data)
+    shard_root = Path(args.shard_dir) if args.shard_dir else Path("shards")
+    shard_root.mkdir(parents=True, exist_ok=True)
     with open(root / "manifest_degraded.csv", newline="", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] in args.splits]
 
@@ -239,7 +243,7 @@ def main():
     # ---------------------------------------------------------- merge mode: no transcription
     if args.merge:
         cache = read_jsonl_cache(main_cache_path)
-        files = shard_files(root, args.model)
+        files = shard_files(shard_root, args.model)
         if not files and not cache:
             sys.exit(f"No shard files (asr_{args.model}.shard*of*.jsonl) or cache found in {root}")
         for p in files:
@@ -270,7 +274,7 @@ def main():
     items = build_items(my_utts)
 
     if sharded:
-        cache_path = root / f"asr_{args.model}.shard{args.shard_id}of{args.num_shards}.jsonl"
+        cache_path = shard_root / f"asr_{args.model}.shard{args.shard_id}of{args.num_shards}.jsonl"
         cache = read_jsonl_cache(main_cache_path)      # anything already merged counts as done
         cache.update(read_jsonl_cache(cache_path))     # plus this shard's own progress
         print(f"shard {args.shard_id}/{args.num_shards}: {len(my_utts)} of {len(utts)} utterances")

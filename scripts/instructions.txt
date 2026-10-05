@@ -1,0 +1,161 @@
+# Setup and Usage Instructions
+
+## Step 1: Setup WSL
+If you're on Windows, install and setup Windows Subsystem for Linux (WSL):
+- Open PowerShell as Administrator
+- Run: wsl --install
+- Restart your computer and complete the Ubuntu setup
+- Set up your Ubuntu user and password
+
+## Step 2: Navigate to Repository
+Once WSL is running, navigate to the project directory:
+```bash
+cd /home/viseash/Ashley/BTP
+```
+
+## Step 3: Setup Python 3.12 with uv Virtual Environment
+Install uv and create a Python 3.12 virtual environment:
+```bash
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment with Python 3.12
+uv venv --python 3.12
+
+# Activate the virtual environment
+source .venv/bin/activate
+
+# Install dependencies
+uv pip install datasets numpy scipy soundfile faster-whisper python-dotenv
+```
+
+## Step 4: Install ffmpeg with AMR-NB Encoder
+```bash
+# Install ffmpeg with AMR-NB support
+sudo apt-get update
+sudo apt-get install ffmpeg libopencore-amrnb
+
+# Verify AMR-NB encoder is available
+ffmpeg -encoders | grep -i amr
+```
+
+## Step 5: Authenticate with Hugging Face
+```bash
+# Login to Hugging Face (requires account and access token)
+huggingface-cli login
+
+# Or create .env file with HF_TOKEN
+echo "HF_TOKEN=your_token_here" > .env
+```
+
+## Step 6: Extract Audio Data
+Extract Hindi speech from IndicVoices dataset:
+```bash
+python -m scripts.extraction --out data --max-hours 3
+```
+
+This will:
+- Download and extract ~3 hours of Hindi speech
+- Create 16 kHz WAV files in data/clean/
+- Generate manifest.csv with metadata
+
+## Step 7: Degrade Audio
+Simulate telephone channel degradation:
+```bash
+python -m scripts.degrade --data data
+```
+
+This will:
+- Downsample audio to 8 kHz
+- Add noise at various SNR levels
+- Apply AMR-NB codec
+- Create degraded audio in data/degraded/
+- Generate manifest_degraded.csv
+
+## Step 8: Evaluate ASR (Single Machine)
+Evaluate Whisper ASR model:
+```bash
+python -m scripts.eval_asr --data data
+```
+
+This will:
+- Transcribe audio across all degradation conditions
+- Calculate WER with bootstrap confidence intervals
+- Generate asr_summary_small.csv with results
+
+## Step 9: Evaluate ASR with Sharding (Multiple Machines)
+For large-scale evaluation across multiple machines:
+
+On each machine:
+```bash
+# Machine 0
+python -m scripts.eval_asr --data data --num-shards 3 --shard-id 0
+
+# Machine 1
+python -m scripts.eval_asr --data data --num-shards 3 --shard-id 1
+
+# Machine 2
+python -m scripts.eval_asr --data data --num-shards 3 --shard-id 2
+```
+
+After all shards complete, copy all shard files from shards/ to one shards/ folder and merge:
+```bash
+python -m scripts.eval_asr --data data --merge
+```
+
+Note: Shard files are saved to shards/ at repository root (can be changed with --shard-dir)
+
+## Additional Options
+
+### Change Whisper Model Size
+```bash
+python -m scripts.eval_asr --data data --model medium
+```
+
+### Use GPU for Faster Inference
+```bash
+python -m scripts.eval_asr --data data --device cuda
+```
+
+### Evaluate on Specific Splits
+```bash
+python -m scripts.eval_asr --data data --splits dev test
+```
+
+### Increase Number of Utterances
+```bash
+python -m scripts.eval_asr --data data --max-utts 500
+```
+
+## Troubleshooting
+
+### ffmpeg AMR-NB encoder missing
+If the encoder check fails, reinstall ffmpeg with AMR-NB support:
+```bash
+sudo apt-get install --reinstall ffmpeg libopencore-amrnb
+```
+
+### Hugging Face authentication issues
+Make sure your HF_TOKEN is set correctly in .env file or run:
+```bash
+huggingface-cli login --token your_token_here
+```
+
+### Out of memory errors
+Use a smaller Whisper model or reduce max-utts:
+```bash
+python -m scripts.eval_asr --data data --model tiny --max-utts 50
+```
+
+## Complete Workflow Summary
+```bash
+cd /home/viseash/Ashley/BTP
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install datasets numpy scipy soundfile faster-whisper python-dotenv
+sudo apt-get install ffmpeg libopencore-amrnb
+huggingface-cli login
+python -m scripts.extraction --out data --max-hours 3
+python -m scripts.degrade --data data
+python -m scripts.eval_asr --data data
+```
