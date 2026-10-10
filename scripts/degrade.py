@@ -40,6 +40,7 @@ Design choices (all logged per row in the manifest)
 import argparse
 import csv
 import hashlib
+import json
 import math
 import shutil
 import subprocess
@@ -82,14 +83,26 @@ def split_of_key(key):
     return "train" if v < 80 else ("dev" if v < 90 else "test")
 
 
-@lru_cache(maxsize=128)
-def load_audio16k(path):
+def _read16k(path):
     x, sr = sf.read(path, dtype="float32", always_2d=True)
     x = x.mean(axis=1)
     if sr != SR:
         g = math.gcd(SR, sr)
         x = resample_poly(x, SR // g, sr // g).astype(np.float32)
     return x
+
+
+@lru_cache(maxsize=128)
+def load_audio16k(path):
+    """speech clips: short, so a big cache is cheap"""
+    return _read16k(path)
+
+
+@lru_cache(maxsize=3)
+def load_noise16k(path):
+    """noise recordings can be minutes long (DEMAND ~5 min = ~19 MB each), so keep the cache tiny:
+    128 of them per worker exhausted RAM on an 8 GB machine"""
+    return _read16k(path)
 
 
 def active_power(x, frame=FRAME):
@@ -193,7 +206,7 @@ def process(job):
         if nt == "file":
             pool = CFG["noise_pools"][row["split"]]
             path = pool[int(nrng.integers(len(pool)))]
-            nz = crop_or_tile(load_audio16k(path), n, nrng)
+            nz = crop_or_tile(load_noise16k(path), n, nrng)
             noise_name = str(Path(path).relative_to(CFG["noise_root"]))
         elif nt == "babble":
             nz = babble(n, CFG["clean_pools"][row["split"]], clean_abs, nrng)
@@ -266,12 +279,29 @@ def find_noise_files(root):
     return sorted(p for p in Path(root).rglob("*") if p.suffix.lower() in exts)
 
 
-def build_noise_pools(files, root, group_by):
+def build_noise_pools(files, root, group_by, dev_noise=(), test_noise=()):
+    """dev_noise / test_noise: explicit group names (e.g. DEMAND environment folders) forced into
+    that split; when either is given, everything not listed goes to train. Otherwise the hash
+    decides."""
     pools = {"train": [], "dev": [], "test": []}
+    explicit = bool(dev_noise or test_noise)
     for p in files:
         rel = p.relative_to(root)
         key = rel.parent.as_posix() if group_by == "dir" and str(rel.parent) != "." else rel.as_posix()
-        pools[split_of_key(key)].append(str(p))
+        if explicit:
+            top = key.split("/")[0]
+            s = "test" if top in test_noise else "dev" if top in dev_noise else "train"
+        else:
+            s = split_of_key(key)
+        pools[s].append(str(p))
+    if explicit:
+        found = {k.split("/")[0] for k in
+                 ((p.relative_to(root).parent.as_posix() if group_by == "dir" else p.relative_to(root).as_posix())
+                  for p in files)}
+        missing = (set(dev_noise) | set(test_noise)) - found
+        if missing:
+            sys.exit(f"--dev-noise/--test-noise names not found under the noise dir: {sorted(missing)}")
+    print("noise files per pool: " + ", ".join(f"{s}={len(v)}" for s, v in pools.items()))
     for s in pools:
         if not pools[s]:
             print(f"WARNING: no noise files landed in the '{s}' pool; using all noise files for "
@@ -295,6 +325,10 @@ def main():
     ap.add_argument("--noise-dir", default=None)
     ap.add_argument("--noise-group-by", choices=["file", "dir"], default="file",
                     help="hold out noise per file or per folder (use 'dir' for DEMAND)")
+    ap.add_argument("--test-noise", nargs="*", default=[], metavar="NAME",
+                    help="folder names forced into the TEST noise pool, e.g. DLIVING NPARK TCAR")
+    ap.add_argument("--dev-noise", nargs="*", default=[], metavar="NAME",
+                    help="folder names forced into the DEV noise pool; all others go to train")
     ap.add_argument("--synthetic", nargs="*", default=None, choices=["white", "pink", "brown", "babble"],
                     help="synthetic noise types (default: all four if no --noise-dir, else none)")
     ap.add_argument("--snrs", type=float, nargs="+", default=[0, 5, 10, 15, 20])
@@ -308,6 +342,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--workers", type=int, default=max(1, cpu_count() // 2))
     ap.add_argument("--limit", type=int, default=0, help="only the first N utterances (smoke test)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted run (same settings): skip rows already finished")
     args = ap.parse_args()
 
     check_ffmpeg()
@@ -327,7 +363,8 @@ def main():
         noise_files = find_noise_files(args.noise_dir)
         if not noise_files:
             sys.exit(f"No .wav/.flac files under {args.noise_dir}")
-        noise_pools = build_noise_pools(noise_files, Path(args.noise_dir), args.noise_group_by)
+        noise_pools = build_noise_pools(noise_files, Path(args.noise_dir), args.noise_group_by,
+                                         set(args.dev_noise), set(args.test_noise))
         synthetic = synthetic or []
     else:
         synthetic = synthetic if synthetic is not None else ["white", "pink", "brown", "babble"]
@@ -352,12 +389,39 @@ def main():
 
     cfg = dict(out=str(out), seed=args.seed, noise_pools=noise_pools, noise_root=noise_root,
                clean_pools=clean_pools)
-    results = []
-    with Pool(args.workers, initializer=init_worker, initargs=(cfg,)) as pool:
+    # progress log: every finished row is appended immediately, so a crash / kill / Ctrl-C does not
+    # lose the run. --resume reuses rows from a previous run only if the settings are identical.
+    fp = str(h(json.dumps(dict(
+        seed=args.seed, noise_dir=args.noise_dir, group=args.noise_group_by, snrs=args.snrs,
+        synth=sorted(synthetic), grid_splits=args.grid_splits, grid_br=args.grid_bitrates,
+        no_codec_only=args.no_codec_only, copies=args.train_copies, br=args.bitrates,
+        co_prob=args.codec_only_prob, limit=args.limit,
+        pools={k: sorted(v) for k, v in noise_pools.items()}, n_rows=len(rows)), sort_keys=True)))
+    prog_path = out / ".degrade_progress.jsonl"
+    results, done_ids = [], set()
+    if args.resume and prog_path.exists():
+        with open(prog_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue  # half-written last line from a crash
+                if d.get("fp") == fp and (out / d["row"]["degraded_path"]).exists():
+                    results.append(d["row"])
+                    done_ids.add(d["row"]["deg_id"])
+        print(f"resume: {len(done_ids)} of {len(jobs)} rows already done")
+    else:
+        prog_path.unlink(missing_ok=True)
+    jobs = [j for j in jobs if j["deg_id"] not in done_ids]
+
+    with open(prog_path, "a", encoding="utf-8") as prog, \
+            Pool(args.workers, initializer=init_worker, initargs=(cfg,), maxtasksperchild=200) as pool:
         for i, res in enumerate(pool.imap_unordered(process, jobs, chunksize=4), 1):
             results.append(res)
-            if i % 200 == 0:
-                print(f"  {i}/{len(jobs)}")
+            prog.write(json.dumps({"fp": fp, "row": res}, ensure_ascii=False) + "\n")
+            prog.flush()
+            if i % 100 == 0 or i == len(jobs):
+                print(f"  {i}/{len(jobs)}", flush=True)
 
     results.sort(key=lambda r: r["deg_id"])
     mpath = out / "manifest_degraded.csv"

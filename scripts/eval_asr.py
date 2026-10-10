@@ -9,8 +9,8 @@ Transcribes, for each selected utterance, a ladder of conditions and reports WER
     snr_20 ... snr_0   noise at that SNR + 8 kHz + AMR-NB
 
 Reads  <data>/manifest_degraded.csv   (from degrade.py)
-Writes <data>/asr_<model>.jsonl       raw hypotheses (cache: re-runs skip finished items)
-       <data>/asr_summary_<model>.csv per-condition WER with 95% bootstrap CI
+Writes <project_root>/artifacts/run_<timestamp>/asr_<model>.jsonl       raw hypotheses (cache: re-runs skip finished items)
+       <project_root>/artifacts/run_<timestamp>/asr_summary_<model>.csv per-condition WER with 95% bootstrap CI
 
 Setup:   pip install faster-whisper scipy soundfile numpy python-dotenv
          pip install groq            # only for --backend groq (key in GROQ_API_KEY or .env)
@@ -43,10 +43,10 @@ SHARDING (several machines, one slice each; for local models)
       machine 1:  python eval_asr.py --data data --num-shards 3 --shard-id 1
       machine 2:  python eval_asr.py --data data --num-shards 3 --shard-id 2
 
-    Each writes its own  <data>/asr_<model>.shard<i>of<N>.jsonl  and does NOT score.
-    Copy all shard files into one <data> folder, then merge + score (no model needed):
+    Each writes its own  <artifacts_dir>/shards/asr_<model>.shard<i>of<N>.jsonl  and does NOT score.
+    Copy all shard files into one artifacts directory, then merge + score (no model needed):
 
-      python eval_asr.py --data data --merge
+      python eval_asr.py --data data --merge --artifacts-dir artifacts/run_YYYYMMDD_HHMMSS
 
     Merge folds every shard file into asr_<model>.jsonl and scores. If some utterances are
     incomplete (a shard unfinished), they are dropped from scoring with a warning so every
@@ -64,6 +64,7 @@ import sys
 import time
 import unicodedata
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -260,8 +261,33 @@ def read_jsonl_cache(path):
     return cache
 
 
-def shard_files(root, model):
-    shards_dir = root / "artifacts" / "shards"
+def get_project_root():
+    """Get the project root directory (where this script's parent directory is located)."""
+    script_path = Path(__file__).resolve()
+    return script_path.parent.parent
+
+
+def get_unique_artifact_dir():
+    """Create a unique artifacts directory based on timestamp."""
+    project_root = get_project_root()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    artifacts_dir = project_root / "artifacts" / f"run_{timestamp}"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return artifacts_dir
+
+
+def get_artifact_dir(path=None):
+    """Get artifacts directory - either specified path or create new timestamped one."""
+    if path:
+        artifacts_dir = Path(path).resolve()
+        if not artifacts_dir.exists():
+            sys.exit(f"Specified artifacts directory does not exist: {artifacts_dir}")
+        return artifacts_dir
+    return get_unique_artifact_dir()
+
+
+def shard_files(artifacts_dir, model):
+    shards_dir = artifacts_dir / "shards"
     return sorted(shards_dir.glob(f"asr_{model}.shard*of*.jsonl"))
 
 
@@ -325,7 +351,9 @@ def main():
     ap.add_argument("--shard-id", type=int, default=0,
                     help="which slice this run handles, 0 .. num-shards-1")
     ap.add_argument("--merge", action="store_true",
-                    help="combine all shard files in --data and score; no transcription")
+                    help="combine all shard files and score; no transcription")
+    ap.add_argument("--artifacts-dir", default=None,
+                    help="path to existing artifacts directory (for merge only); otherwise creates new timestamped dir")
     args = ap.parse_args()
     if args.model is None:
         args.model = DEFAULT_MODEL[args.backend]
@@ -341,10 +369,11 @@ def main():
               "running shards in parallel will just hit 429s sooner.")
 
     root = Path(args.data)
-    artifacts_dir = root / "artifacts"
+    artifacts_dir = get_artifact_dir(args.artifacts_dir)
     shards_dir = artifacts_dir / "shards"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
     shards_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Artifacts directory: {artifacts_dir}")
     
     with open(root / "manifest_degraded.csv", newline="", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] in args.splits]
@@ -377,9 +406,9 @@ def main():
     # ---------------------------------------------------------- merge mode: no transcription
     if args.merge:
         cache = read_jsonl_cache(main_cache_path)
-        files = shard_files(root, args.model)
+        files = shard_files(artifacts_dir, args.model)
         if not files and not cache:
-            sys.exit(f"No shard files (asr_{args.model}.shard*of*.jsonl) or cache found in {root}")
+            sys.exit(f"No shard files (asr_{args.model}.shard*of*.jsonl) or cache found in {artifacts_dir}")
         for p in files:
             part = read_jsonl_cache(p)
             print(f"  {p.name}: {len(part)} hypotheses")
@@ -448,9 +477,9 @@ def main():
 
     if sharded:
         print(f"\nshard {args.shard_id}/{args.num_shards} done -> {cache_path}")
-        print("Copy all shard files into one data folder, then run:  "
+        print("Copy all shard files into one artifacts directory, then run:  "
               f"python eval_asr.py --data {args.data} --backend {args.backend} --model {args.model} "
-              f"--splits {' '.join(args.splits)} --max-utts {args.max_utts} --merge")
+              f"--splits {' '.join(args.splits)} --max-utts {args.max_utts} --merge --artifacts-dir {artifacts_dir}")
         return
 
     score(root, artifacts_dir, args, items, my_utts, by_utt, cache)
