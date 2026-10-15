@@ -59,6 +59,15 @@ SR = 16000
 SR_NB = 8000
 FRAME = 320  # 20 ms at 16 kHz
 
+
+def get_dataset_name(data_path):
+    """Extract dataset name from data path (e.g., 'data_musan' -> 'musan', 'data' -> 'synthetic')."""
+    data_path = Path(data_path)
+    if data_path.name == "data":
+        return "synthetic"
+    return data_path.name
+
+
 OUT_COLS = [
     "deg_id", "utt_id", "split", "speaker_id",
     "clean_path", "clean8k_path", "degraded_path",
@@ -196,6 +205,8 @@ def process(job):
     # so the SNR label is the SNR the codec actually sees.
     clean8 = sf.read(str(out / row["clean8k_path"]), dtype="float32")[0]
 
+    dataset_name = CFG["dataset_name"]
+
     nt, snr = job["noise_type"], job["snr_db"]
     noise_name = ""
     if nt == "none":
@@ -227,7 +238,7 @@ def process(job):
     delay = estimate_delay(x8, y8)
     y8 = shift_fit(y8, delay, len(clean8))
 
-    deg_rel = f"degraded/{job['deg_id']}.wav"
+    deg_rel = f"degraded/{dataset_name}/{nt}/{job['deg_id']}.wav"
     sf.write(str(out / deg_rel), y8, SR_NB, subtype="PCM_16")
 
     return {
@@ -322,7 +333,7 @@ def check_ffmpeg():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data")
-    ap.add_argument("--noise-dir", default=None)
+    ap.add_argument("--noise-dir", default="data/noise/musan")
     ap.add_argument("--noise-group-by", choices=["file", "dir"], default="file",
                     help="hold out noise per file or per folder (use 'dir' for DEMAND)")
     ap.add_argument("--test-noise", nargs="*", default=[], metavar="NAME",
@@ -374,21 +385,36 @@ def main():
     print(f"noise types: {noise_types}  ({len(noise_files)} noise files)")
 
     # clean 8 kHz references (written once, up front)
-    (out / "clean8k").mkdir(exist_ok=True)
-    (out / "degraded").mkdir(exist_ok=True)
+    dataset_name = get_dataset_name(args.data)
+    (out / "clean_8k").mkdir(exist_ok=True)
+    (out / "degraded" / dataset_name).mkdir(parents=True, exist_ok=True)
     clean_pools = {"train": [], "dev": [], "test": []}
-    for r in rows:
-        src = str(out / r["clean_path"])
-        clean_pools[r["split"]].append(src)
-        r["clean8k_path"] = f"clean8k/{r['utt_id']}.wav"
-        sf.write(str(out / r["clean8k_path"]),
-                 resample_poly(load_audio16k(src), 1, 2).astype(np.float32), SR_NB, subtype="PCM_16")
+    
+    # Check if clean_8k already exists and skip regeneration
+    clean8k_dir = out / "clean_8k"
+    if clean8k_dir.exists() and any(clean8k_dir.iterdir()):
+        print(f"clean_8k directory already exists at {clean8k_dir}, skipping regeneration")
+        for r in rows:
+            src = str(out / r["clean_path"])
+            clean_pools[r["split"]].append(src)
+            r["clean8k_path"] = f"clean_8k/{r['utt_id']}.wav"
+    else:
+        for r in rows:
+            src = str(out / r["clean_path"])
+            clean_pools[r["split"]].append(src)
+            r["clean8k_path"] = f"clean_8k/{r['utt_id']}.wav"
+            sf.write(str(out / r["clean8k_path"]),
+                     resample_poly(load_audio16k(src), 1, 2).astype(np.float32), SR_NB, subtype="PCM_16")
+
+    # Create degraded directories for each noise type
+    for noise_type in noise_types:
+        (out / "degraded" / dataset_name / noise_type).mkdir(parents=True, exist_ok=True)
 
     jobs = plan_jobs(rows, args, noise_types)
     print(f"{len(rows)} utterances -> {len(jobs)} degraded files, {args.workers} workers")
 
     cfg = dict(out=str(out), seed=args.seed, noise_pools=noise_pools, noise_root=noise_root,
-               clean_pools=clean_pools)
+               clean_pools=clean_pools, dataset_name=dataset_name)
     # progress log: every finished row is appended immediately, so a crash / kill / Ctrl-C does not
     # lose the run. --resume reuses rows from a previous run only if the settings are identical.
     fp = str(h(json.dumps(dict(

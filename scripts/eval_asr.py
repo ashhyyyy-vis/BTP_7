@@ -267,23 +267,27 @@ def get_project_root():
     return script_path.parent.parent
 
 
-def get_unique_artifact_dir():
-    """Create a unique artifacts directory based on timestamp."""
+def get_dataset_name(data_path):
+    """Extract dataset name from data path (e.g., 'data_musan' from 'data/datasets/data_musan')."""
+    data_path = Path(data_path)
+    if data_path.name == "data":
+        return "synthetic"  # For synthetic noise at data/degraded/
+    return data_path.name
+
+
+def get_artifact_dir(path=None, data_path=None, model=None):
+    """Get artifacts directory - either specified path or create model-based one."""
     project_root = get_project_root()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    artifacts_dir = project_root / "artifacts" / f"run_{timestamp}"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    return artifacts_dir
-
-
-def get_artifact_dir(path=None):
-    """Get artifacts directory - either specified path or create new timestamped one."""
     if path:
         artifacts_dir = Path(path).resolve()
         if not artifacts_dir.exists():
             sys.exit(f"Specified artifacts directory does not exist: {artifacts_dir}")
         return artifacts_dir
-    return get_unique_artifact_dir()
+    # Create model-based directory: artifacts/experiments/{dataset_name}/asr/{model}/
+    dataset_name = get_dataset_name(data_path) if data_path else "default"
+    artifacts_dir = project_root / "artifacts" / "experiments" / dataset_name / "asr" / model
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return artifacts_dir
 
 
 def shard_files(artifacts_dir, model):
@@ -369,7 +373,7 @@ def main():
               "running shards in parallel will just hit 429s sooner.")
 
     root = Path(args.data)
-    artifacts_dir = get_artifact_dir(args.artifacts_dir)
+    artifacts_dir = get_artifact_dir(args.artifacts_dir, args.data, args.model)
     shards_dir = artifacts_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
     

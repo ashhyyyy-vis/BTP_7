@@ -39,6 +39,14 @@ TEXT_CANDIDATES = ["text", "normalized", "verbatim"]
 SPEAKER_CANDIDATES = ["speaker_id", "speaker", "client_id"]
 SCENARIO_CANDIDATES = ["scenario", "task_name"]
 
+
+def get_dataset_name(out_path):
+    """Extract dataset name from output path (e.g., 'data_musan' from 'data/datasets/data_musan')."""
+    out_path = Path(out_path)
+    if out_path.name == "datasets":
+        return "default"
+    return out_path.name
+
 MANIFEST_COLS = [
     "utt_id", "split", "speaker_id", "clean_path", "degraded_path",
     "noise_file", "snr_db", "amr_bitrate", "seed", "transcript",
