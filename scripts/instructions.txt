@@ -51,111 +51,106 @@ echo "HF_TOKEN=your_token_here" > .env
 ## Step 6: Extract Audio Data
 Extract Hindi speech from IndicVoices dataset:
 ```bash
-python -m scripts.extraction --out data --max-hours 3
+python -m scripts.extraction --out data --max-hours 3 --hf-token <YOUR_HF_TOKEN>
 ```
 
 This will:
-- Download and extract ~3 hours of Hindi speech
+- Download and extract clean Hindi speech
 - Create 16 kHz WAV files in data/clean/
-- Generate manifest.csv with metadata
+- Generate data/manifest.csv with metadata
 
 ## Step 7: Degrade Audio
-Simulate telephone channel degradation:
+Simulate telephone channel degradation for synthetic, MUSAN, or DEMAND:
 ```bash
-python -m scripts.degrade --data data
+# Synthetic
+python -m scripts.degrade --data data --noise-type synthetic
+
+# MUSAN
+python -m scripts.degrade --data data --noise-type musan --noise-dir data/noise/musan
+
+# DEMAND
+python -m scripts.degrade --data data --noise-type demand --noise-dir data/noise/demand --noise-group-by dir
 ```
 
 This will:
-- Downsample audio to 8 kHz
-- Add noise at various SNR levels
-- Apply AMR-NB codec
-- Create degraded audio in data/degraded/
-- Generate manifest_degraded.csv
+- Check data/clean8k/ and create 8 kHz clean audio if not present
+- Apply AMR-NB codec and noise mixing
+- Save files to data/degraded/<noise_type>/
+- Write metadata to data/degraded/<noise_type>/manifest_degraded.csv
 
-## Step 8: Evaluate ASR (Single Machine)
-Evaluate Whisper ASR model:
+## Step 8: Evaluate ASR
+Evaluate Whisper ASR model on degraded audio:
 ```bash
-python -m scripts.eval_asr --data data
+# Local model
+python -m scripts.eval_asr --data data --noise-type musan --model small
+
+# Cloud Groq model
+python -m scripts.eval_asr --data data --noise-type musan --backend groq --model whisper-large-v3 --groq-key <YOUR_GROQ_KEY>
 ```
 
-This will:
-- Transcribe audio across all degradation conditions
-- Calculate WER with bootstrap confidence intervals
-- Generate asr_summary_small.csv with results
+Results are saved to:
+- `artifacts/Metrics/<noise_type>/ASR/asr_<model>.jsonl`
+- `artifacts/Metrics/<noise_type>/ASR/asr_summary_<model>.csv`
 
-## Step 9: Evaluate ASR with Sharding (Multiple Machines)
-For large-scale evaluation across multiple machines:
-
+### Sharded ASR Evaluation (Multiple Machines)
 On each machine:
 ```bash
-# Machine 0
-python -m scripts.eval_asr --data data --num-shards 3 --shard-id 0
-
-# Machine 1
-python -m scripts.eval_asr --data data --num-shards 3 --shard-id 1
-
-# Machine 2
-python -m scripts.eval_asr --data data --num-shards 3 --shard-id 2
+python -m scripts.eval_asr --data data --noise-type musan --num-shards 3 --shard-id 0
+python -m scripts.eval_asr --data data --noise-type musan --num-shards 3 --shard-id 1
+python -m scripts.eval_asr --data data --noise-type musan --num-shards 3 --shard-id 2
 ```
-
-After all shards complete, copy all shard files from shards/ to one shards/ folder and merge:
+Shards are written to `artifacts/shards/`. Merge all shards with:
 ```bash
-python -m scripts.eval_asr --data data --merge
+python -m scripts.eval_asr --data data --noise-type musan --merge
 ```
 
-Note: Shard files are saved to shards/ at repository root (can be changed with --shard-dir)
-
-## Additional Options
-
-### Change Whisper Model Size
+## Step 9: Denoise / Speech Enhancement
+Run front-end enhancers over degraded 8 kHz audio:
 ```bash
-python -m scripts.eval_asr --data data --model medium
+python -m scripts.denoise --data data --noise-type musan --methods wiener_dd dfn
 ```
+Output:
+- Enhanced audio in `artifacts/Metrics/<noise_type>/Enhancement/<method>/`
 
-### Use GPU for Faster Inference
+## Step 10: Compute Enhancement Metrics
+Calculate SI-SDR, STOI, and PESQ:
 ```bash
-python -m scripts.eval_asr --data data --device cuda
+python -m scripts.enh_metrics --data data --noise-type musan --front-ends wiener_dd dfn
 ```
+Output:
+- `artifacts/Metrics/<noise_type>/Enhancement/enh_metrics_summary.csv`
+- `artifacts/Metrics/<noise_type>/Enhancement/enh_metrics_per_file.csv`
 
-### Evaluate on Specific Splits
+## Step 11: Evaluate Post-Enhancement ASR
+Compare enhanced speech against original degraded speech on ASR:
 ```bash
-python -m scripts.eval_asr --data data --splits dev test
+python -m scripts.eval_enh --data data --noise-type musan --model small --front-ends wiener_dd dfn
 ```
+Output:
+- `artifacts/Metrics/<noise_type>/ASR/enh_summary_<model>.csv`
 
-### Increase Number of Utterances
-```bash
-python -m scripts.eval_asr --data data --max-utts 500
-```
-
-## Troubleshooting
-
-### ffmpeg AMR-NB encoder missing
-If the encoder check fails, reinstall ffmpeg with AMR-NB support:
-```bash
-sudo apt-get install --reinstall ffmpeg libopencore-amrnb
-```
-
-### Hugging Face authentication issues
-Make sure your HF_TOKEN is set correctly in .env file or run:
-```bash
-huggingface-cli login --token your_token_here
-```
-
-### Out of memory errors
-Use a smaller Whisper model or reduce max-utts:
-```bash
-python -m scripts.eval_asr --data data --model tiny --max-utts 50
-```
+---
 
 ## Complete Workflow Summary
 ```bash
 cd /home/viseash/Ashley/BTP
-uv venv --python 3.12
 source .venv/bin/activate
-uv pip install datasets numpy scipy soundfile faster-whisper python-dotenv
-sudo apt-get install ffmpeg libopencore-amrnb
-huggingface-cli login
+
+# 1. Extract
 python -m scripts.extraction --out data --max-hours 3
-python -m scripts.degrade --data data
-python -m scripts.eval_asr --data data
+
+# 2. Degrade
+python -m scripts.degrade --data data --noise-type musan
+
+# 3. Eval ASR
+python -m scripts.eval_asr --data data --noise-type musan --model small
+
+# 4. Denoise
+python -m scripts.denoise --data data --noise-type musan --methods wiener_dd dfn
+
+# 5. Record Metrics
+python -m scripts.enh_metrics --data data --noise-type musan --front-ends wiener_dd dfn
+
+# 6. Compare with ASR
+python -m scripts.eval_enh --data data --noise-type musan --model small --front-ends wiener_dd dfn
 ```

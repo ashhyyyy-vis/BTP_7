@@ -24,15 +24,18 @@ so no speaker appears in more than one split.
 import argparse
 import csv
 import hashlib
+import os
 import subprocess
 import sys
 import wave
 from pathlib import Path
 
 from datasets import Audio, load_dataset
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 DATASET = "ai4bharat/IndicVoices"
 TEXT_CANDIDATES = ["text", "normalized", "verbatim"]
@@ -112,11 +115,17 @@ def main():
                     help="keep only this scenario value, e.g. a conversational one "
                          "(check the values with --inspect)")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--hf-token", default=None,
+                    help="Hugging Face token (overrides HF_TOKEN in env / .env)")
     ap.add_argument("--inspect", action="store_true",
                     help="print schema and one example, then exit")
     args = ap.parse_args()
 
-    ds = load_dataset(DATASET, args.language, split=args.hf_split, streaming=True)
+    token = args.hf_token or os.environ.get("HF_TOKEN")
+    if args.hf_token:
+        os.environ["HF_TOKEN"] = args.hf_token
+
+    ds = load_dataset(DATASET, args.language, split=args.hf_split, streaming=True, token=token)
 
     # ---- inspect mode ----------------------------------------------------
     if args.inspect:

@@ -1,0 +1,10 @@
+group,name,wer,ci_lo,ci_hi,n_utts
+condition,clean,27.4,23.3,32.4,100
+condition,clean8k,28.3,24.4,32.2,100
+condition,codec_only,31.9,27.4,37.3,100
+condition,snr_20,32.4,28.3,37.5,100
+condition,snr_15,34.3,30.7,38.2,100
+condition,snr_10,38.5,33.5,43.7,100
+condition,snr_5,42.9,38.7,47.3,100
+condition,snr_0,52.2,46.5,58.4,100
+noise_type,file,40.1,37.8,42.5,500

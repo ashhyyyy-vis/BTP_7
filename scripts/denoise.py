@@ -57,12 +57,29 @@ SR = 8000
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # scripts/ -> project root
 
 
-def get_dataset_name(data_path):
-    """Extract dataset name from data path (e.g., 'data_musan' from 'data/datasets/data_musan')."""
+def get_dataset_name(data_path="data", noise_type=None):
+    """Extract dataset name: explicit noise_type, or from data_path, or default 'synthetic'."""
+    if noise_type:
+        return noise_type
     data_path = Path(data_path)
     if data_path.name == "data":
-        return "synthetic"  # For synthetic noise at data/degraded/
+        return "synthetic"
+    if data_path.name.startswith("data_"):
+        return data_path.name.replace("data_", "")
     return data_path.name
+
+
+def get_manifest_path(data_path, dataset_name):
+    """Get the manifest path based on dataset name and directory structure."""
+    data_path = Path(data_path)
+    if not data_path.exists() or data_path.name.startswith("data_"):
+        data_path = data_path.parent / "data" if data_path.parent.name else Path("data")
+    deg_manifest = data_path / "degraded" / dataset_name / "manifest_degraded.csv"
+    if deg_manifest.exists():
+        return deg_manifest
+    if dataset_name == "synthetic" and (data_path / "manifest_degraded.csv").exists():
+        return data_path / "manifest_degraded.csv"
+    return deg_manifest
 
 # ------------------------------------------------------------------ classical baseline
 NFFT, HOP = 256, 64          # 32 ms window, 8 ms hop (75 % overlap)
@@ -144,10 +161,11 @@ def shift_fit(y, lag, n):
     return y[:n]
 
 
-def select_rows(root, splits, max_utts, snrs):
+def select_rows(root, dataset_name, splits, max_utts, snrs):
     """Same utterance rule as eval_asr.py (manifest order, non-empty transcript, first N);
     keeps noisy rows at the requested SNRs."""
-    with open(root / "manifest_degraded.csv", newline="", encoding="utf-8") as f:
+    manifest_path = get_manifest_path(root, dataset_name)
+    with open(manifest_path, newline="", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] in splits]
     by_utt = defaultdict(list)
     for r in rows:
@@ -168,9 +186,12 @@ def parse_shard(text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data")
+    ap.add_argument("--noise-type", choices=["synthetic", "musan", "demand"], default=None,
+                    help="noise dataset type: synthetic, musan, or demand")
     ap.add_argument("--artifacts", default=str(PROJECT_ROOT / "artifacts"),
-                    help="root folder for outputs; results go to <artifacts>/<data_name>/enh/<method>/")
-    ap.add_argument("--methods", nargs="+", default=["wiener_dd"], choices=["wiener_dd", "dfn"])
+                    help="root folder for outputs; results go to <artifacts>/Metrics/<noise_type>/Enhancement/<method>/")
+    ap.add_argument("--methods", nargs="+", default=["wiener_dd"],
+                    choices=["wiener_dd", "dfn", "dfn_atten12", "dfn_mix50"])
     ap.add_argument("--splits", nargs="+", default=["test"])
     ap.add_argument("--max-utts", type=int, default=100)
     ap.add_argument("--snrs", type=float, nargs="+", default=[0, 5, 10])
@@ -183,19 +204,19 @@ def main():
     args = ap.parse_args()
 
     root = Path(args.data)
-    dataset_name = get_dataset_name(args.data)
-    art_root = Path(args.artifacts) / "experiments" / dataset_name  # e.g. <projectroot>/artifacts/experiments/data_musan
-    utts, sel = select_rows(root, set(args.splits), args.max_utts, args.snrs)
+    dataset_name = get_dataset_name(args.data, noise_type=args.noise_type)
+    art_root = Path(args.artifacts) / "Metrics" / dataset_name
+    utts, sel = select_rows(root, dataset_name, set(args.splits), args.max_utts, args.snrs)
     if not sel:
         sys.exit("No noisy rows selected (check --splits / --snrs against manifest_degraded.csv).")
     if args.shard:
         sel = sel[args.shard[0]:: args.shard[1]]
     tag = f"_shard{args.shard[0]}of{args.shard[1]}" if args.shard else ""
-    print(f"{len(utts)} utterances, {len(sel)} noisy files to enhance"
+    print(f"[{dataset_name}] {len(utts)} utterances, {len(sel)} noisy files to enhance"
           + (f" (shard {args.shard[0]}/{args.shard[1]})" if args.shard else ""))
 
     for method in args.methods:
-        outdir = art_root / "enh" / method
+        outdir = art_root / "Enhancement" / method
         outdir.mkdir(parents=True, exist_ok=True)
         todo = [r for r in sel if args.force or not (outdir / f"{r['deg_id']}.wav").exists()]
         print(f"\n[{method}] {len(todo)} to do, {len(sel) - len(todo)} already done")
@@ -203,11 +224,27 @@ def main():
             continue
         if method == "wiener_dd":
             fn = wiener_dd
-        else:
+        elif method == "dfn":
             if args.threads:
                 import torch
                 torch.set_num_threads(args.threads)
             fn = DFN(args.dfn_atten)
+        elif method == "dfn_atten12":
+            if args.threads:
+                import torch
+                torch.set_num_threads(args.threads)
+            fn = DFN(atten_lim_db=12.0 if args.dfn_atten is None else args.dfn_atten)
+        elif method == "dfn_mix50":
+            if args.threads:
+                import torch
+                torch.set_num_threads(args.threads)
+            dfn_model = DFN(args.dfn_atten)
+            def mix50(x, m=dfn_model):
+                y_enh = m(x)
+                lag = estimate_delay(x, y_enh)
+                y_enh = shift_fit(y_enh, lag, len(x))
+                return 0.5 * y_enh + 0.5 * x
+            fn = mix50
 
         log_path = outdir / f"log{tag}.csv"
         new_log = not log_path.exists()

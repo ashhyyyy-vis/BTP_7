@@ -1,0 +1,13 @@
+group,name,wer,ci_lo,ci_hi,n_utts
+condition,clean,27.8,23.6,33.0,100
+condition,clean8k,27.8,23.9,32.0,100
+condition,codec_only,30.8,27.0,35.0,100
+condition,snr_20,31.9,27.8,36.4,100
+condition,snr_15,34.7,30.5,39.5,100
+condition,snr_10,39.4,34.9,44.0,100
+condition,snr_5,47.6,41.6,53.5,100
+condition,snr_0,64.4,58.0,71.6,100
+noise_type,babble,48.6,43.5,54.7,110
+noise_type,brown,28.8,25.4,32.3,110
+noise_type,pink,44.1,39.8,48.7,175
+noise_type,white,54.7,49.1,60.5,105

@@ -70,9 +70,11 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 COND_ORDER = ["clean", "clean8k", "codec_only", "snr_20", "snr_15", "snr_10", "snr_5", "snr_0"]
 GROQ_MIN_BILLED_S = 10.0  # Groq bills any request shorter than this as this many seconds
@@ -84,25 +86,10 @@ class RateLimitStop(Exception):
 
 
 # ------------------------------------------------------------------ text normalisation
-def normalize(text):
-    """THE transcript convention. Reference and hypothesis both go through this.
-    Edit it once, together with your teammates, and never per-experiment.
-    Currently: NFC, lower-case Latin, drop punctuation and the danda, keep letters / combining
-    marks / digits, Devanagari digits -> ASCII digits, collapse spaces.
-    NOT handled yet: whether English words are written in Latin or Devanagari -- decide that
-    rule and add it here (it can move WER by many points)."""
-    out = []
-    for c in unicodedata.normalize("NFC", text).lower():
-        cat = unicodedata.category(c)
-        if cat == "Nd":
-            out.append(str(unicodedata.digit(c)))
-        elif cat[0] in "LM":  # letters and combining marks (Devanagari matras are 'M')
-            out.append(c)
-        elif cat == "Cf":  # zero-width joiners etc.: delete, don't split the word
-            continue
-        else:
-            out.append(" ")
-    return " ".join("".join(out).split())
+try:
+    from scripts.hindi_norm import normalize
+except ImportError:
+    from hindi_norm import normalize
 
 
 def edit_distance(ref, hyp):
@@ -162,12 +149,13 @@ def get_groq_transcriber(args):
         import groq
     except ImportError:
         sys.exit("--backend groq needs the SDK:  pip install groq")
-    if not os.environ.get("GROQ_API_KEY"):
-        sys.exit("GROQ_API_KEY is not set (export it, or put it in a .env file next to this script).")
+    api_key = getattr(args, "groq_key", None) or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        sys.exit("GROQ_API_KEY is not set (pass --groq-key, export it, or put it in a .env file next to this script).")
 
     # max_retries=0: the SDK's own silent retries would burn requests against the quota;
     # we handle 429s ourselves below.
-    client = groq.Groq(max_retries=0)
+    client = groq.Groq(api_key=api_key, max_retries=0)
     rpm_eff = args.groq_rpm * args.groq_margin
     ash_eff = args.groq_ash * args.groq_margin
     state = {"next": 0.0}
@@ -267,32 +255,62 @@ def get_project_root():
     return script_path.parent.parent
 
 
-def get_dataset_name(data_path):
-    """Extract dataset name from data path (e.g., 'data_musan' from 'data/datasets/data_musan')."""
+def get_dataset_name(data_path="data", noise_type=None):
+    """Extract dataset name: explicit noise_type, or from data_path, or default 'synthetic'."""
+    if noise_type:
+        return noise_type
     data_path = Path(data_path)
     if data_path.name == "data":
-        return "synthetic"  # For synthetic noise at data/degraded/
+        return "synthetic"
+    if data_path.name.startswith("data_"):
+        return data_path.name.replace("data_", "")
     return data_path.name
 
 
-def get_artifact_dir(path=None, data_path=None, model=None):
-    """Get artifacts directory - either specified path or create model-based one."""
+def get_manifest_path(data_path, dataset_name):
+    """Get the manifest path based on dataset name and directory structure."""
+    data_path = Path(data_path)
+    if not data_path.exists() or data_path.name.startswith("data_"):
+        data_path = data_path.parent / "data" if data_path.parent.name else Path("data")
+    deg_manifest = data_path / "degraded" / dataset_name / "manifest_degraded.csv"
+    if deg_manifest.exists():
+        return deg_manifest
+    # Fallback for synthetic if flat manifest exists
+    if dataset_name == "synthetic" and (data_path / "manifest_degraded.csv").exists():
+        return data_path / "manifest_degraded.csv"
+    return deg_manifest
+
+
+def get_artifact_dir(path=None, data_path=None, model=None, dataset_name=None):
+    """Get ASR metrics directory: artifacts/Metrics/<dataset_name>/ASR/."""
     project_root = get_project_root()
     if path:
         artifacts_dir = Path(path).resolve()
         if not artifacts_dir.exists():
             sys.exit(f"Specified artifacts directory does not exist: {artifacts_dir}")
         return artifacts_dir
-    # Create model-based directory: artifacts/experiments/{dataset_name}/asr/{model}/
-    dataset_name = get_dataset_name(data_path) if data_path else "default"
-    artifacts_dir = project_root / "artifacts" / "experiments" / dataset_name / "asr" / model
+    ds_name = dataset_name or (get_dataset_name(data_path) if data_path else "synthetic")
+    artifacts_dir = project_root / "artifacts" / "Metrics" / ds_name / "ASR"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     return artifacts_dir
 
 
-def shard_files(artifacts_dir, model):
-    shards_dir = artifacts_dir / "shards"
-    return sorted(shards_dir.glob(f"asr_{model}.shard*of*.jsonl"))
+def shard_files(shards_dir, model, dataset_name=None):
+    shards_dir = Path(shards_dir)
+    if not shards_dir.exists():
+        return []
+    if dataset_name:
+        files = sorted(shards_dir.glob(f"asr_{model}_{dataset_name}.shard*of*.jsonl"))
+        if files:
+            return files
+    return sorted(shards_dir.glob(f"asr_{model}*.shard*of*.jsonl"))
+
+
+def parse_shard(text):
+    k, n = (int(v) for v in text.split("/"))
+    if not (n >= 1 and 0 <= k < n):
+        raise argparse.ArgumentTypeError("use K/N with 0 <= K < N, e.g. 1/2")
+    return k, n
 
 
 # ------------------------------------------------------------------ scoring
@@ -335,6 +353,8 @@ def score(root, artifacts_dir, args, items, utts, by_utt, cache):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data")
+    ap.add_argument("--noise-type", choices=["synthetic", "musan", "demand"], default=None,
+                    help="noise dataset type: synthetic, musan, or demand")
     ap.add_argument("--splits", nargs="+", default=["test"])
     ap.add_argument("--max-utts", type=int, default=100)
     ap.add_argument("--backend", choices=["local", "groq"], default="local")
@@ -342,6 +362,8 @@ def main():
                     help="default: 'small' (local) or 'whisper-large-v3' (groq)")
     ap.add_argument("--device", default="cpu", help="local backend only")
     ap.add_argument("--compute-type", default="int8", help="local backend only")
+    ap.add_argument("--groq-key", default=None,
+                    help="Groq API key (overrides GROQ_API_KEY in env / .env)")
     ap.add_argument("--groq-rpm", type=float, default=20, help="requests/min limit (free plan: 20)")
     ap.add_argument("--groq-ash", type=float, default=7200, help="audio-seconds/hour limit (free plan: 7200)")
     ap.add_argument("--groq-rpd", type=float, default=2000, help="requests/day limit, for the estimate only")
@@ -357,10 +379,13 @@ def main():
     ap.add_argument("--merge", action="store_true",
                     help="combine all shard files and score; no transcription")
     ap.add_argument("--artifacts-dir", default=None,
-                    help="path to existing artifacts directory (for merge only); otherwise creates new timestamped dir")
+                    help="path to existing ASR metrics directory (defaults to artifacts/Metrics/<noise_type>/ASR/)")
     args = ap.parse_args()
     if args.model is None:
         args.model = DEFAULT_MODEL[args.backend]
+
+    if args.groq_key:
+        os.environ["GROQ_API_KEY"] = args.groq_key
 
     if args.num_shards < 1 or not (0 <= args.shard_id < args.num_shards):
         sys.exit("--shard-id must satisfy 0 <= shard-id < num-shards")
@@ -373,13 +398,16 @@ def main():
               "running shards in parallel will just hit 429s sooner.")
 
     root = Path(args.data)
-    artifacts_dir = get_artifact_dir(args.artifacts_dir, args.data, args.model)
-    shards_dir = artifacts_dir / "shards"
+    dataset_name = get_dataset_name(args.data, noise_type=args.noise_type)
+    artifacts_dir = get_artifact_dir(args.artifacts_dir, args.data, args.model, dataset_name=dataset_name)
+    shards_dir = get_project_root() / "artifacts" / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Artifacts directory: {artifacts_dir}")
+    print(f"Shards directory: {shards_dir}")
     
-    with open(root / "manifest_degraded.csv", newline="", encoding="utf-8") as f:
+    manifest_path = get_manifest_path(root, dataset_name)
+    with open(manifest_path, newline="", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] in args.splits]
 
     by_utt = defaultdict(list)
@@ -410,9 +438,11 @@ def main():
     # ---------------------------------------------------------- merge mode: no transcription
     if args.merge:
         cache = read_jsonl_cache(main_cache_path)
-        files = shard_files(artifacts_dir, args.model)
+        files = shard_files(shards_dir, args.model, dataset_name=dataset_name)
+        if not files:
+            files = shard_files(artifacts_dir / "shards", args.model, dataset_name=dataset_name)
         if not files and not cache:
-            sys.exit(f"No shard files (asr_{args.model}.shard*of*.jsonl) or cache found in {artifacts_dir}")
+            sys.exit(f"No shard files found in {shards_dir} or cache in {artifacts_dir}")
         for p in files:
             part = read_jsonl_cache(p)
             print(f"  {p.name}: {len(part)} hypotheses")
@@ -441,7 +471,7 @@ def main():
     items = build_items(my_utts)
 
     if sharded:
-        cache_path = shards_dir / f"asr_{args.model}.shard{args.shard_id}of{args.num_shards}.jsonl"
+        cache_path = shards_dir / f"asr_{args.model}_{dataset_name}.shard{args.shard_id}of{args.num_shards}.jsonl"
         cache = read_jsonl_cache(main_cache_path)      # anything already merged counts as done
         cache.update(read_jsonl_cache(cache_path))     # plus this shard's own progress
         print(f"shard {args.shard_id}/{args.num_shards}: {len(my_utts)} of {len(utts)} utterances")
@@ -481,9 +511,9 @@ def main():
 
     if sharded:
         print(f"\nshard {args.shard_id}/{args.num_shards} done -> {cache_path}")
-        print("Copy all shard files into one artifacts directory, then run:  "
-              f"python eval_asr.py --data {args.data} --backend {args.backend} --model {args.model} "
-              f"--splits {' '.join(args.splits)} --max-utts {args.max_utts} --merge --artifacts-dir {artifacts_dir}")
+        print("Copy all shard files into artifacts/shards, then run:  "
+              f"python eval_asr.py --data {args.data} --noise-type {dataset_name} --backend {args.backend} --model {args.model} "
+              f"--splits {' '.join(args.splits)} --max-utts {args.max_utts} --merge")
         return
 
     score(root, artifacts_dir, args, items, my_utts, by_utt, cache)

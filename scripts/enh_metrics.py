@@ -37,12 +37,29 @@ SR = 8000
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # scripts/ -> project root
 
 
-def get_dataset_name(data_path):
-    """Extract dataset name from data path (e.g., 'data_musan' from 'data/datasets/data_musan')."""
+def get_dataset_name(data_path="data", noise_type=None):
+    """Extract dataset name: explicit noise_type, or from data_path, or default 'synthetic'."""
+    if noise_type:
+        return noise_type
     data_path = Path(data_path)
     if data_path.name == "data":
-        return "synthetic"  # For synthetic noise at data/degraded/
+        return "synthetic"
+    if data_path.name.startswith("data_"):
+        return data_path.name.replace("data_", "")
     return data_path.name
+
+
+def get_manifest_path(data_path, dataset_name):
+    """Get the manifest path based on dataset name and directory structure."""
+    data_path = Path(data_path)
+    if not data_path.exists() or data_path.name.startswith("data_"):
+        data_path = data_path.parent / "data" if data_path.parent.name else Path("data")
+    deg_manifest = data_path / "degraded" / dataset_name / "manifest_degraded.csv"
+    if deg_manifest.exists():
+        return deg_manifest
+    if dataset_name == "synthetic" and (data_path / "manifest_degraded.csv").exists():
+        return data_path / "manifest_degraded.csv"
+    return deg_manifest
 
 
 def si_sdr(ref, est, eps=1e-9):
@@ -69,8 +86,9 @@ def load_metric_fns():
     return fns
 
 
-def select_rows(root, splits, max_utts, snrs):
-    with open(root / "manifest_degraded.csv", newline="", encoding="utf-8") as f:
+def select_rows(root, dataset_name, splits, max_utts, snrs):
+    manifest_path = get_manifest_path(root, dataset_name)
+    with open(manifest_path, newline="", encoding="utf-8") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] in splits]
     by_utt = defaultdict(list)
     for r in rows:
@@ -96,8 +114,10 @@ def paired_ci(delta, boot=2000, seed=0):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data")
+    ap.add_argument("--noise-type", choices=["synthetic", "musan", "demand"], default=None,
+                    help="noise dataset type: synthetic, musan, or demand")
     ap.add_argument("--artifacts", default=str(PROJECT_ROOT / "artifacts"),
-                    help="root folder for outputs; enhanced audio is read from and metrics are written to <artifacts>/experiments/<data_name>/")
+                    help="root folder for outputs; enhanced audio is read from and metrics are written to <artifacts>/Metrics/<noise_type>/Enhancement/")
     ap.add_argument("--front-ends", nargs="+", default=["wiener_dd", "dfn"])
     ap.add_argument("--splits", nargs="+", default=["test"])
     ap.add_argument("--max-utts", type=int, default=100)
@@ -105,10 +125,11 @@ def main():
     args = ap.parse_args()
 
     root = Path(args.data)
-    dataset_name = get_dataset_name(args.data)
-    art_root = Path(args.artifacts) / "experiments" / dataset_name  # e.g. <projectroot>/artifacts/experiments/data_musan
-    art_root.mkdir(parents=True, exist_ok=True)
-    sel, codec_rows = select_rows(root, set(args.splits), args.max_utts, args.snrs)
+    dataset_name = get_dataset_name(args.data, noise_type=args.noise_type)
+    art_root = Path(args.artifacts) / "Metrics" / dataset_name
+    enh_dir = art_root / "Enhancement"
+    enh_dir.mkdir(parents=True, exist_ok=True)
+    sel, codec_rows = select_rows(root, dataset_name, set(args.splits), args.max_utts, args.snrs)
     if not sel:
         sys.exit("No noisy rows selected.")
     fns = load_metric_fns()
@@ -137,7 +158,14 @@ def main():
     for i, r in enumerate(sel, 1):
         ref = sf.read(str(root / r["clean8k_path"]), dtype="float32")[0]
         for m in methods:
-            p = root / r["degraded_path"] if m == "none" else art_root / "enh" / m / f"{r['deg_id']}.wav"
+            if m == "none":
+                p = root / r["degraded_path"]
+            else:
+                p = enh_dir / m / f"{r['deg_id']}.wav"
+                if not p.exists():
+                    fallback_p = art_root / "enh" / m / f"{r['deg_id']}.wav"
+                    if fallback_p.exists():
+                        p = fallback_p
             if not p.exists():
                 skipped[m] += 1
                 continue
@@ -160,7 +188,7 @@ def main():
         print(f"WARNING: {k} files missing for '{m}' (run denoise.py first); those utterances are not compared")
 
     metrics = list(fns)
-    with open(art_root / "enh_metrics_per_file.csv", "w", newline="", encoding="utf-8") as f:
+    with open(enh_dir / "enh_metrics_per_file.csv", "w", newline="", encoding="utf-8") as f:
         wr = csv.DictWriter(f, fieldnames=["deg_id", "utt_id", "front_end", "snr_db", "noise_group"] + metrics)
         wr.writeheader()
         wr.writerows(per_file)
@@ -192,12 +220,12 @@ def main():
     for mt, v in ceil_mean.items():
         summary.append(dict(front_end="codec_only_ceiling", snr_db="ref", metric=mt, n=len(ceiling[mt]),
                             none_mean=f"{v:.3f}", fe_mean="", delta="", d_lo="", d_hi=""))
-    with open(art_root / "enh_metrics_summary.csv", "w", newline="", encoding="utf-8") as f:
+    with open(enh_dir / "enh_metrics_summary.csv", "w", newline="", encoding="utf-8") as f:
         wr = csv.DictWriter(f, fieldnames=["front_end", "snr_db", "metric", "n", "none_mean", "fe_mean",
-                                           "delta", "d_lo", "d_hi"])
+                                            "delta", "d_lo", "d_hi"])
         wr.writeheader()
         wr.writerows(summary)
-    print(f"\nsaved {art_root / 'enh_metrics_summary.csv'} and enh_metrics_per_file.csv")
+    print(f"\nsaved {enh_dir / 'enh_metrics_summary.csv'} and {enh_dir / 'enh_metrics_per_file.csv'}")
 
 
 if __name__ == "__main__":
