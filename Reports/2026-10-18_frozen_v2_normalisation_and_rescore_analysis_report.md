@@ -1,3 +1,5 @@
+> **SUPERSEDED:** see Reports/2026-10-18_checkpoint1_consolidated_results.md (section 8 lists corrections to this report).
+
 # [2026-10-18] Frozen v2 Normalisation Rescore and Front-End Robustness Report
 
 **Date:** October 18, 2026  

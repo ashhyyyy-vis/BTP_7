@@ -36,8 +36,9 @@ else
 fi
 
 echo "== Step 2: degrade ($NOISE) =="
-# --noise-group-by dir keeps each DEMAND environment as one group
-python scripts/degrade.py --data data --noise-type "$NOISE" --noise-dir "$NOISE_DIR" --noise-group-by dir
+# --noise-group-by dir keeps each DEMAND environment as one group; held-out test and dev environments
+python scripts/degrade.py --data data --noise-type "$NOISE" --noise-dir "$NOISE_DIR" --noise-group-by dir \
+  --test-noise DLIVING NPARK TCAR --dev-noise OOFFICE STRAFFIC
 
 echo "== Step 3: Gate 1 ASR ($BACKEND / $MODEL) =="
 python scripts/eval_asr.py "${ASR_ARGS[@]}"

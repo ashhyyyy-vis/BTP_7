@@ -1,3 +1,5 @@
+> **SUPERSEDED:** see Reports/2026-10-18_checkpoint1_consolidated_results.md (section 8 lists corrections to this report).
+
 # [2026-10-17] Investigation of Speech Enhancement Front-Ends for Emergency Call (Dial 112) Hindi ASR under AMR-NB Telephone Degradation
 
 **Date:** October 17, 2026  

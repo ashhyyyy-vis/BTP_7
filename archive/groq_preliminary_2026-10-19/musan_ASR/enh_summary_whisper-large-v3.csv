@@ -1,0 +1,16 @@
+group,front_end,name,wer,ci_lo,ci_hi,sub_pct,del_pct,ins_pct,delta,d_lo,d_hi,gap_closed_pct,n_utts
+condition,none,clean,27.4,23.3,32.4,20.9,5.9,0.6,,,,,100
+condition,none,clean8k,28.3,24.4,32.2,22.3,5.0,1.1,,,,,100
+condition,none,codec_only,31.9,27.4,37.3,22.1,8.3,1.5,,,,,100
+condition,none,snr_5,42.9,38.7,47.3,32.2,8.2,2.4,,,,,100
+condition,dfn_atten12,snr_5,42.0,37.7,46.7,31.6,8.0,2.4,-0.87,-2.93,1.14,8,100
+condition,dfn_mix50,snr_5,42.6,37.8,47.6,32.4,8.3,1.9,-0.31,-2.77,2.25,3,100
+condition,none,snr_0,52.2,46.5,58.4,36.8,12.9,2.5,,,,,100
+condition,dfn_atten12,snr_0,53.3,47.5,58.9,36.4,14.0,2.9,1.11,-1.74,4.35,-5,100
+condition,dfn_mix50,snr_0,53.5,47.8,59.6,34.8,15.8,2.9,1.24,-1.80,4.36,-6,100
+noise_group,none,free-sound,47.6,42.4,52.4,,,,,,,,90
+noise_group,dfn_atten12,free-sound,48.0,43.2,52.9,,,,0.35,-1.74,2.23,,90
+noise_group,dfn_mix50,free-sound,48.3,43.1,53.7,,,,0.69,-1.42,2.81,,90
+noise_group,none,sound-bible,46.8,38.3,60.4,,,,,,,,10
+noise_group,dfn_atten12,sound-bible,45.0,35.1,58.9,,,,-1.75,-6.96,2.93,,10
+noise_group,dfn_mix50,sound-bible,45.3,35.6,60.6,,,,-1.46,-4.38,1.09,,10

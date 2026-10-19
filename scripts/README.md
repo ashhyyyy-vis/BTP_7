@@ -179,11 +179,9 @@ python scripts/eval_enh.py --data data --noise-type musan --model small --front-
 ```
 - Summary saved to `artifacts/Metrics/<noise_type>/ASR/enh_summary_<model>.csv`.
 
----
+## Utility & Normalisation Scripts
 
-## API Keys Configuration
+- `hindi_norm.py`: THE frozen text normaliser for this project (v2, never edit).
+- `rescore.py`: offline re-scoring of cached transcripts without making any ASR calls.
 
-You can either pass keys as CLI parameters or set them in `.env`:
-- Hugging Face token: pass `--hf-token <token>` to `extraction.py` or set `HF_TOKEN` in `.env`.
-- Groq API key: pass `--groq-key <key>` to `eval_asr.py` / `eval_enh.py` or set `GROQ_API_KEY` in `.env`.
 
