@@ -3,6 +3,11 @@
 > **FOR AI AGENTS (e.g. Antigravity, Claude Code, Cursor, Codex):**
 > You are running as an autonomous AI agent on the RTX GPU machine (Linux / WSL2 Ubuntu).
 > Execute each step in this runbook sequentially. Run the verification commands after each step and assert that the output matches the **Expected Output / Assertions**.
+> 
+> **Agent Notification & Pre-flight Directives:**
+> - **WSL2 & `.wslconfig` Check:** Check if WSL2 is properly configured. If running in a fresh environment, verify whether `/mnt/c/Users/<UserName>/.wslconfig` exists and has appropriate memory allocated (at least 16 GB or 75% host RAM). If WSL2 is missing or unconfigured, **notify the user immediately** with the setup instructions provided in **Step 0**.
+> - **Data Transfer (Google Drive / rclone / gdown):** In **Step 2**, retrieve `baseline_bundle.tar` from Google Drive (or copy from the Windows Downloads folder). The user will provide the GDrive link or transfer via rclone.
+> 
 > **Non-negotiable constraints:**
 > - Do **NOT** modify the text normalizer (`scripts/hindi_norm.py`); it is frozen at v2.
 > - Do **NOT** attempt to re-extract or re-degrade audio from scratch. All audio is pre-built in `baseline_bundle.tar`.
@@ -19,24 +24,54 @@
 | **Repository URL (SSH)** | `git@github.com:ashhyyyy-vis/BTP_7.git` | Alternative if SSH key is set |
 | **Git Branch** | `WER-test` | Must checkout this branch |
 | **Working Directory** | `~/project` | Inside Ubuntu/WSL2 home (never run under `/mnt/c/` for I/O performance) |
+| **GDrive Bundle Link** | `<PASTE_GDRIVE_LINK_FOR_baseline_bundle.tar>` | Replace with Google Drive shareable link |
+| **Bundle MD5 Hash** | `1c7af10bd262744c88c6cb8725148fc7` | Verified checksum of `baseline_bundle.tar` |
 | **ASR Model** | `large-v3` (`Systran/faster-whisper-large-v3`) | Evaluated locally on CUDA |
 | **Target Test Set** | `167` utterances | All utterances in the test split |
-| **GDrive Bundle URL** | `https://drive.google.com/file/d/1Xl-oI3R9D1yF3r1jC2eL8z8HqgO5qgO5/view?usp=sharing` | Replace with active GDrive link for `baseline_bundle.tar` |
-| **GDrive MD5 URL** | `https://drive.google.com/file/d/1Ym-pI3R9D1yF3r1jC2eL8z8HqgO5qgO5/view?usp=sharing` | Replace with active GDrive link for `baseline_bundle.md5` |
 
 ---
 
-## Step 0. [Windows Host / WSL2] Pre-flight & GPU Verification
+## Step 0. [Windows Host / WSL2] Install, Configure WSL2 & Check GPU
 
-1. **[Windows Host]** Ensure the latest NVIDIA Game Ready / Studio drivers are installed on Windows (from GeForce Experience or [nvidia.com](https://www.nvidia.com/Download/index.aspx)).
-2. **[Windows Host]** Disable system sleep: **Settings > System > Power > Screen and sleep > "When plugged in, put my device to sleep" -> Never**.
-3. **[WSL2 / Ubuntu]** Open the WSL2 terminal and verify NVIDIA CUDA pass-through:
-   ```bash
-   nvidia-smi
-   ```
-   **Expected Output / Assertion:**
-   - A GPU status table displays your NVIDIA GPU name (e.g. RTX 3060 / 4060 / 4070 / 3080 / etc.) and total VRAM (e.g., `8192MiB`, `12288MiB`, `16384MiB`).
-   - If `nvidia-smi` outputs `command not found` or `no devices found`, halt: WSL2 NVIDIA driver pass-through is not working.
+> **Agent Instruction:** If WSL2 is not installed or GPU pass-through is failing, notify the user with the following instructions:
+
+### 1. [Windows Host] Install / Update WSL2 & NVIDIA Drivers
+Open PowerShell as Administrator:
+```powershell
+# Install WSL2 Ubuntu (skip if already installed)
+wsl --install -d Ubuntu
+wsl --update
+```
+Install the latest NVIDIA Game Ready / Studio drivers on Windows (from GeForce Experience or [nvidia.com](https://www.nvidia.com/Download/index.aspx)).
+
+### 2. [Windows Host] Configure `.wslconfig` (Crucial for GPU & Memory Allocation)
+To prevent WSL2 from throttling memory during Whisper large-v3 execution, create or edit `.wslconfig` in your Windows User directory (`C:\Users\<YourUserName>\.wslconfig`):
+
+```ini
+[wsl2]
+memory=16GB          # Allocate 16GB RAM or ~75-80% of total host RAM
+processors=8         # Allocate CPU threads
+swap=8GB             # Swap file space
+localhostForwarding=true
+```
+
+Apply the configuration in PowerShell:
+```powershell
+wsl --shutdown
+```
+Then reopen the Ubuntu terminal.
+
+### 3. [Windows Host] Prevent Sleep
+Settings > System > Power > Screen and sleep > "When plugged in, put my device to sleep" -> **Never**.
+
+### 4. [WSL2 / Ubuntu] Verify NVIDIA GPU Pass-Through
+Inside the Ubuntu terminal:
+```bash
+nvidia-smi
+```
+**Expected Output / Assertion:**
+- A GPU status table displays your NVIDIA GPU model (e.g. RTX 3060 / 4060 / 4070 / 3080 / etc.) and total VRAM (e.g., `8192MiB`, `12288MiB`, `16384MiB`).
+- If `nvidia-smi` outputs `command not found` or `no devices found`, halt and notify user: WSL2 NVIDIA driver pass-through is not working.
 
 ---
 
@@ -66,7 +101,7 @@ ls -d scripts docs Reports shell_scripts
 
 ## Step 2. Download, Verify & Unpack the Audio Bundle
 
-The audio bundle `baseline_bundle.tar` (~1.7 GB) and its checksum `baseline_bundle.md5` contain:
+The audio bundle `baseline_bundle.tar` (~1.7 GB) contains:
 - `data/manifest.csv`, `data/clean`, `data/clean8k`
 - `data/degraded/musan` (3,716 files), `data/degraded/demand` (3,716 files)
 - Pre-computed enhanced test audio for DEMAND and MUSAN (Wiener, DFN, DFN variants)
@@ -76,23 +111,24 @@ The audio bundle `baseline_bundle.tar` (~1.7 GB) and its checksum `baseline_bund
 cd ~/project
 pip install -q gdown
 
-# Paste your actual GDrive file IDs or share URLs below:
+# Replace with the Google Drive link provided by the user:
 GDRIVE_BUNDLE_LINK="<PASTE_GDRIVE_LINK_FOR_baseline_bundle.tar>"
-GDRIVE_MD5_LINK="<PASTE_GDRIVE_LINK_FOR_baseline_bundle.md5>"
 
 gdown "$GDRIVE_BUNDLE_LINK" -O baseline_bundle.tar
-gdown "$GDRIVE_MD5_LINK" -O baseline_bundle.md5
 ```
 
-### Method B: Copy from Windows Downloads (If downloaded manually via browser)
+### Method B: Download via `rclone` (If configured on RTX machine)
 ```bash
 cd ~/project
-# Replace <YOUR_WINDOWS_USERNAME> with your Windows username:
-WINDOWS_USER=$(ls /mnt/c/Users/ | grep -vE 'Public|Default|desktop.ini|All Users' | head -n1)
-echo "Detected Windows user: $WINDOWS_USER"
+# Downloads directly with a live progress bar:
+rclone copy gdrive:BTP/baseline_bundle.tar ~/project/ -P
+```
 
+### Method C: Copy from Windows Downloads (If downloaded via browser on Windows host)
+```bash
+cd ~/project
+WINDOWS_USER=$(ls /mnt/c/Users/ | grep -vE 'Public|Default|desktop.ini|All Users' | head -n1)
 cp "/mnt/c/Users/$WINDOWS_USER/Downloads/baseline_bundle.tar" ~/project/
-cp "/mnt/c/Users/$WINDOWS_USER/Downloads/baseline_bundle.md5" ~/project/
 ```
 
 ### Verification & Extraction
@@ -100,11 +136,14 @@ Run the integrity check and unpack:
 ```bash
 cd ~/project
 
-# 1. Assert MD5 Checksum
+# 1. Write the verified MD5 checksum directly (no separate download needed)
+echo "1c7af10bd262744c88c6cb8725148fc7  baseline_bundle.tar" > baseline_bundle.md5
+
+# 2. Assert MD5 Checksum
 md5sum -c baseline_bundle.md5
 # Expected: baseline_bundle.tar: OK (exit code 0)
 
-# 2. Extract bundle
+# 3. Extract bundle
 tar -xf baseline_bundle.tar
 
 # 3. Assert exact file counts
@@ -394,9 +433,9 @@ bash shell_scripts/run_local_baseline.sh
 
 ## Completion Checklist for the Executing Agent
 
-- [ ] **Step 0:** `nvidia-smi` confirms NVIDIA GPU with CUDA support.
+- [ ] **Step 0:** WSL2 verified, `.wslconfig` configured with adequate RAM/cores, and `nvidia-smi` confirms NVIDIA GPU with CUDA.
 - [ ] **Step 1:** Repository cloned on branch `WER-test` inside `~/project`.
-- [ ] **Step 2:** `baseline_bundle.tar` MD5 checksum matches (`baseline_bundle.tar: OK`) and audio file counts verified (`3716` MUSAN, `3716` DEMAND, `501`/`501`/`501`/`334` enhancement).
+- [ ] **Step 2:** Audio bundle downloaded, `baseline_bundle.tar` MD5 checksum matches (`baseline_bundle.tar: OK`) and audio file counts verified (`3716` MUSAN, `3716` DEMAND, `501`/`501`/`501`/`334` enhancement).
 - [ ] **Step 3:** Virtual environment active with `COMPUTE` set and `ctranslate2` reports visible GPU.
 - [ ] **Step 4:** Smoke test passes with Devanagari Hindi text in `asr_large-v3.jsonl`.
 - [ ] **Step 5:** Full untreated run produces `1336` entries in both MUSAN and DEMAND `.jsonl` files.
